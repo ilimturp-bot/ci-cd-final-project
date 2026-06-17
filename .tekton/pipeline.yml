@@ -19,6 +19,10 @@ spec:
       type: string
       default: main
 
+    - name: build-image
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/sn-labs-vbps271/cd-app:latest
+
   tasks:
     - name: cleanup
       taskRef:
@@ -32,6 +36,7 @@ spec:
         - cleanup
       taskRef:
         name: git-clone
+        kind: ClusterTask
       params:
         - name: url
           value: $(params.git-url)
@@ -57,6 +62,9 @@ spec:
         - flake8
       taskRef:
         name: nose
+      params:
+        - name: args
+          value: "-v"
       workspaces:
         - name: source
           workspace: output
@@ -66,3 +74,24 @@ spec:
         - nose
       taskRef:
         name: buildah
+        kind: ClusterTask
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+        - name: CONTAINERFILE_PATH
+          value: Dockerfile
+        - name: TLS_VERIFY
+          value: "false"
+      workspaces:
+        - name: source
+          workspace: output
+
+  finally:
+    - name: deploy
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
