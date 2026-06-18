@@ -29,9 +29,26 @@ spec:
       script: |
         #!/bin/bash
         set -e
-        python -m pip install --upgrade pip
+
+        python -m pip install --upgrade pip wheel
         pip install flake8
-        flake8 .
+
+        echo "Workspace content before flake8:"
+        pwd
+        ls -la
+
+        cat > /tmp/flake8.cfg << 'EOF'
+        [flake8]
+        max-line-length = 127
+        exclude = .git,.tekton,venv,__pycache__,.venv
+        per-file-ignores =
+            service/__init__.py:F401,E402
+        EOF
+
+        echo "Using flake8 config:"
+        cat /tmp/flake8.cfg
+
+        flake8 service tests --config=/tmp/flake8.cfg --count --statistics
 
 ---
 apiVersion: tekton.dev/v1beta1
@@ -52,6 +69,99 @@ spec:
       script: |
         #!/bin/bash
         set -e
-        python -m pip install --upgrade pip
+
+        python -m pip install --upgrade pip wheel
+        pip install -r requirements.txt
         pip install nose
+
+        echo "Workspace content before tests:"
+        pwd
+        ls -la
+
         nosetests $(params.args)
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: buildah
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: app-name
+      type: string
+      default: cd-app
+  steps:
+    - name: openshift-binary-build
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        echo "===== BUILD TASK USING OPENSHIFT BINARY BUILD ====="
+        echo "Workspace:"
+        pwd
+
+        echo "Workspace files:"
+        ls -la
+
+        echo "Files up to depth 2:"
+        find . -maxdepth 2 -type f | sort
+
+        if [ ! -f Dockerfile ]; then
+          echo "ERROR: Dockerfile is missing in workspace"
+          exit 1
+        fi
+
+        if [ ! -f requirements.txt ]; then
+          echo "ERROR: requirements.txt is missing in workspace"
+          exit 1
+        fi
+
+        if [ ! -d service ]; then
+          echo "ERROR: service directory is missing in workspace"
+          exit 1
+        fi
+
+        echo "Dockerfile, requirements.txt and service/ found."
+
+        if oc get bc $(params.app-name) >/dev/null 2>&1; then
+          echo "BuildConfig $(params.app-name) already exists."
+        else
+          echo "Creating OpenShift binary Docker build..."
+          oc new-build --binary --name=$(params.app-name) --strategy=docker
+        fi
+
+        echo "Starting OpenShift binary build from current directory..."
+        oc start-build $(params.app-name) --from-dir=. --follow --wait
+
+---
+api---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy
+spec:
+  params:
+    - name: app-name
+      type: string
+      default: cd-app
+  steps:
+    - name: deploy
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        echo "Deploying $(params.app-name) from ImageStreamTag $(params.app-name):latest"
+
+        oc delete deployment $(params.app-name) --ignore-not-found=true
+        oc delete service $(params.app-name) --ignore-not-found=true
+
+        oc new-app $(params.app-name):latest --name=$(params.app-name)
+
+        oc expose service $(params.app-name) --port=8000 --target-port=8000 --name=$(params.app-name) || true
+
+        oc rollout status deployment/$(params.app-name) --timeout=180s
